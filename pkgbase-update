@@ -106,6 +106,12 @@ __ver_regex() { # 1=VERSION_TO_CHECK
   VER_CLS=$( echo "${VER_REG}" | awk -F '-' '{print $2}' )
   VER_CLS_LOW=$( echo "${VER_CLS}" | tr 'A-Z' 'a-z' )
 
+  if [ "${VER_CLS_LOW}" = "release" ]; then
+    VER_CLS_LOW=
+  else
+    VER_CLS_LOW="_${VER_CLS_LOW}"
+  fi
+
   if [ "${VER_REG}" != "${1}" ]
   then
     echo "NOPE: the '${1}' does not looks like valid FreeBSD target version"
@@ -145,7 +151,7 @@ case "${1}" in
         fi
 
         echo "FreeBSD-base: {
-                url: \"https://pkg.FreeBSD.org/\${ABI}/base_release_${VER_NUM_MIN}_${VER_CLS_LOW}\"
+                url: \"https://pkg.FreeBSD.org/\${ABI}/base_release_${VER_NUM_MIN}${VER_CLS_LOW}\"
               }" > "/tmp/${VER_REG}/repo.conf"
 
         pkg -o REPOS_DIR=/etc/pkg,/usr/local/etc/pkg/repos,"/tmp/${VER_REG}" \
