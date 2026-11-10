@@ -31,6 +31,7 @@
 # vermaden [AT] interia [DOT] pl
 # https://vermaden.wordpress.com
 
+# DISPLAY USAGE INFORMATION
 __usage() {
   NAME=${0##*/}
   echo "usage:"
@@ -42,11 +43,13 @@ __usage() {
   exit 1
 }
 
+# CLEAN AFTER WORK AND WHEN INTERRUPTED
 __clean() {
   umount -f /boot/efi 1> /dev/null 2> /dev/null
   [ "${VER_REG}" != "" ] && rm -rf "/tmp/${VER_REG}"
 }
 
+# FIND *.pkgnew FILES
 __pkgnew() {
   echo "INFO: checking for configs installed as '.pkgnew' files ..."
   find /etc /usr/local/etc -name '*.pkgnew' -ls
@@ -55,48 +58,131 @@ __pkgnew() {
   echo "INFO: and merge any necessary manual changes"
 }
 
+# UPDATE FreeBSD loader(8) BOOTCODE
 __loader() {
+
+  # FIND SYSTEM ROOT
   BOOT_ROOT=$( mount | awk '/ \/ / {print $1}' )
-  BOOT_POOL=$( echo "${BOOT_ROOT}" | awk -F '/' '{print $1}' )
-  BOOT_DISK=$( zpool status "${BOOT_POOL}" \
-                 | grep -A 256 NAME \
-                 | grep -v '^errors:' \
-                 | grep -v NAME \
-                 | sed 1d \
-                 | awk '{print $1}' \
-                 | awk -F '.' '{print $1}' \
-                 | grep -o -E '[a-z]+[0-9]+' \
-                 | head -1 )
 
-  BOOT_EFI=$( gpart show -p "${BOOT_DISK}" | grep ' efi ' | awk '{print $3}' )
-
-  if ! mkdir -p /boot/efi 1> /dev/null 2> /dev/null
+  # CHECK IF WE HAVE ZFS OR UFS SYSTEM INSTALLATION
+  if echo "${BOOT_ROOT}" | grep -q '^/' 1> /dev/null 2> /dev/null
   then
-    echo "NOPE: could not make sure '/boot/efi' exists"
+
+    echo "INFO: detected UFS based FreeBSD installation"
+
+    # UFS DETECT glabel(8) LABEL
+    if echo "${BOOT_ROOT}" | grep -q '^/dev/label' 1> /dev/null 2> /dev/null
+    then
+
+      # UFS ON glabel(8) DEVICE
+      BOOT_LABEL=$( echo "${BOOT_ROOT}" | sed -e s./dev/..g )
+      BOOT_DISK=$( glabel status | grep "${BOOT_LABEL}" | awk '{print $NF}' )
+      BOOT_DISK=$( echo "${BOOT_DISK}" | grep -o -E '[a-z]+[0-9]+' | head -1 )
+
+    else
+
+      # UFS RAW DISK DEVICE
+      BOOT_DISK=$( echo "${BOOT_ROOT}" | grep -o -E '[a-z]+[0-9]+' | head -1 )
+
+    fi
+
+  else
+
+    echo "INFO: detected ZFS based FreeBSD installation"
+
+    # ZFS
+    BOOT_POOL=$( echo "${BOOT_ROOT}" | awk -F '/' '{print $1}' )
+    BOOT_DISK=$( zpool status "${BOOT_POOL}" \
+                   | grep -A 256 NAME \
+                   | grep -v '^errors:' \
+                   | grep -v NAME \
+                   | sed 1d \
+                   | awk '{print $1}' \
+                   | awk -F '.' '{print $1}' \
+                   | grep -o -E '[a-z]+[0-9]+' \
+                   | head -1 )
+
+  fi
+
+  # FIND freebsd-boot PARTITION
+  BOOT_INDEX=$( gpart show "${BOOT_DISK}" | grep ' freebsd-boot ' | awk '{print $3}' )
+
+  if [ "${BOOT_INDEX}" = "" ]
+  then
+    echo "INFO: could not find BIOS partition on this system"
+  fi
+
+  # UPDATE BIOS FreeBSD loader(8) BOOTCODE
+  gpart bootcode -b /boot/pmbr -p /boot/gptzfsboot -i ${BOOT_INDEX} ${BOOT_DISK} ; RET_VAL=${?}
+
+  # CHECK IF UPDATE SUCCEEDED
+  if [ ${RET_VAL} != "0" ]
+  then
+    echo "NOPE: failed to update BIOS FreeBSD loader(8) bootcode"
     exit 1
   fi
 
-  if ! mount_msdosfs "/dev/${BOOT_EFI}" /boot/efi 1> /dev/null 2> /dev/null
+  # CHECK IF UEFI IS ALREADY MOUNTED AT /boot/efi DIR
+  if mount -p | grep msdosfs | awk '{print $2}' | grep -q /boot/efi
   then
-    echo "NOPE: could not mount(8) UEFI partition"
-    exit 1
+
+    echo "INFO: the UEFI partition is already mounted at /boot/efi dir"
+
+  else
+
+    echo "INFO: the UEFI partition will be now mounted at /boot/efi dir"
+
+    # FIND UEFI PARTITION
+    BOOT_EFI=$( gpart show -p "${BOOT_DISK}" | grep ' efi ' | awk '{print $3}' )
+
+    if [ "${BOOT_EFI}" = "" ]
+    then
+      echo "INFO: could not find UEFI partition on this system"
+      return
+    fi
+
+    # MAKE SURE /boot/efi DIR EXISTS
+    if ! mkdir -p /boot/efi 1> /dev/null 2> /dev/null
+    then
+      echo "NOPE: could not make sure '/boot/efi' exists"
+      exit 1
+    fi
+
+    # MOUNT UEFI PARTITION
+    if ! mount_msdosfs "/dev/${BOOT_EFI}" /boot/efi 1> /dev/null 2> /dev/null
+    then
+      echo "NOPE: could not mount(8) UEFI partition"
+      exit 1
+    fi
+
+    # SET FLAG FOR LATER umount(8) COMMAND
+    MANUAL_UEFI_UMOUNT=1
+
   fi
 
+  # UPDATE FreeBSD loader(8) WITHING PROPER ARCH
   case $( uname -p ) in
     (amd64)   cp /boot/loader.efi /boot/efi/efi/boot/BOOTX64.EFI  ; RET_VAL=${?} ;;
     (aarch64) cp /boot/loader.efi /boot/efi/efi/boot/BOOTAA64.EFI ; RET_VAL=${?} ;;
     (armv7)   cp /boot/loader.efi /boot/efi/efi/boot/BOOTARM.EFI  ; RET_VAL=${?} ;;
   esac
 
+  # CHECK IF UPDATE SUCCEEDED
   if [ ${RET_VAL} != "0" ]
   then
     echo "NOPE: failed to update UEFI FreeBSD loader(8) bootcode"
     exit 1
   fi
 
-  umount -f /boot/efi 1> /dev/null 2> /dev/null
+  # UMOUNT UEFI PARTITION
+  if [ "${MANUAL_UEFI_UMOUNT}" = "1" ]
+  then
+    umount -f /boot/efi 1> /dev/null 2> /dev/null
+  fi
+
 }
 
+# CHECK FreeBSD VERSION STRING
 __ver_regex() { # 1=VERSION_TO_CHECK
   VER_REG=$( echo "${1}" | grep -o -E '[0-9]+\.[0-9]-[A-Z]+[0-9]*' )
   VER_INS=$( freebsd-version )
@@ -105,13 +191,26 @@ __ver_regex() { # 1=VERSION_TO_CHECK
   VER_NUM_MIN=$( echo "${VER_NUM}" | awk -F '.' '{print $2}' )
   VER_CLS=$( echo "${VER_REG}" | awk -F '-' '{print $2}' )
   VER_CLS_LOW=$( echo "${VER_CLS}" | tr 'A-Z' 'a-z' )
+  VER_EXC="PRERELEASE"
 
+  # SOME VERSIONS NEED REVERS sort(1) FOR CHECK
+  REVERSE_SORT=''
+  for EXCEPTION in ${VER_EXC}
+  do
+    if echo "${VER_INS}" | grep -q "${EXCEPTION}"
+    then
+      REVERSE_SORT="-r"
+      break
+    fi
+  done
+
+  # CHECK AND COMPARE FreeBSD VERSION
   if [ "${VER_REG}" != "${1}" ]
   then
     echo "NOPE: the '${1}' does not looks like valid FreeBSD target version"
     exit 1
   else
-    VER_CHK=$( echo -e "${VER_INS}\n${VER_REG}" | sort -n | tail -1 )
+    VER_CHK=$( echo -e "${VER_INS}\n${VER_REG}" | sort ${REVERSE_SORT} -n | tail -1 )
     if [ "${VER_CHK}" != "${VER_REG}" ]
     then
       echo "NOPE: installed '${VER_INS}' is newer then '${VER_REG}' target."
@@ -121,8 +220,12 @@ __ver_regex() { # 1=VERSION_TO_CHECK
   fi
 }
 
+# TRAP TO CLEAN AFTER INTERRUPT
 trap '__clean' 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
 
+
+
+# MAIN
 case "${1}" in
   (upgrade)
 
@@ -130,45 +233,58 @@ case "${1}" in
       (-r)
         __ver_regex "${3}"
 
-        pkg upgrade -y -r FreeBSD-ports pkg
-
+        # CREATE DIR FOR TEMP UPGRADE REPO
         if ! mkdir -p "/tmp/${VER_REG}" 1> /dev/null 2> /dev/null
         then
           echo "NOPE: could not create '/tmp/${VER_REG}' dir"
           exit 1
         fi
 
+        # CHECK IF POSSIBLE TO CREATE REPO CONFIG
         if ! touch "/tmp/${VER_REG}/repo.conf" 1> /dev/null 2> /dev/null
         then
           echo "NOPE: could not create '/tmp/${VER_REG}/repo.conf' file"
           exit 1
         fi
 
+        # CREATE ACTUAL REPO CONFIG
         echo "FreeBSD-base: {
                 url: \"https://pkg.FreeBSD.org/\${ABI}/base_release_${VER_NUM_MIN}_${VER_CLS_LOW}\"
               }" > "/tmp/${VER_REG}/repo.conf"
 
+        # FIRST UPGRADE ONLY THE pkg(8) TOOL
+        # pkg upgrade -y -r FreeBSD-ports pkg
+        pkg upgrade -y -r FreeBSD-ports pkg
+
+        # DO ACTUAL FreeBSD Base System UPGRADE
+        # REASON FOR -U FLAG: pkg(8) ALREADY UPDATED REPOS IN PREVIOUS COMMAND
         pkg -o REPOS_DIR=/etc/pkg,/usr/local/etc/pkg/repos,"/tmp/${VER_REG}" \
             -o IGNORE_OSVERSION=yes \
             upgrade -r FreeBSD-base
 
         echo "INFO: review pkg(8) info - sometimes 'service <name> setup' is needed"
 
+        # UPGRADE KERNEL MODULES FROM FreeBSD-ports-kmods REPO
+        # REASON FOR -U FLAG: pkg(8) ALREADY UPDATED REPOS IN PREVIOUS COMMAND
         pkg -o REPOS_DIR=/etc/pkg,/usr/local/etc/pkg/repos,"/tmp/${VER_REG}" \
             upgrade -r FreeBSD-ports-kmods
 
+        # UPGRADE FreeBSD loader(8) BOOTCODE
         __loader
 
+        # CHECK FOR *.pkgnew FILES
         __pkgnew
 
         echo "INFO: you successfully finished the upgrade process"
         echo "INFO: you may now restart the system with usual command"
         echo "INFO:   # shutdown -r now"
 
+        # CLEAN AFTER WORK
         __clean
         ;;
 
       (*)
+        # PRINT USAGE INFORMATION
         __usage
         ;;
 
@@ -176,14 +292,17 @@ case "${1}" in
     ;;
 
   (loader)
+    # UPGRADE FreeBSD loader(8) BOOTCODE
     __loader
     ;;
 
   (pkgnew)
+    # CHECK FOR *.pkgnew FILES
     __pkgnew
     ;;
 
   (modules)
+    # DISPLAY INFORMATION ABOUT MODULES FROM FreeBSD-ports-kmods REPO
     echo "INFO: check for 3rd party kmods installed from packages"
     pkg which $( kldstat -v | awk -F '[()]' '/\.ko/ {print $2}' )
     echo "INFO: modules at '/boot/kernel' are part of Base System"
@@ -191,7 +310,9 @@ case "${1}" in
     ;;
 
   (*)
+    # PRINT USAGE INFORMATION
     __usage
     ;;
 
 esac
+
