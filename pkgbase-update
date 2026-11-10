@@ -1,0 +1,197 @@
+#! /bin/sh
+
+# Copyright (c) 2026 Slawomir Wojciech Wojtczak (vermaden)
+# All rights reserved.
+#
+# THIS SOFTWARE USES FREEBSD LICENSE (ALSO KNOWN AS 2-CLAUSE BSD LICENSE)
+# https://freebsd.org/copyright/freebsd-license.html
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that following conditions are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS 'AS IS' AND ANY
+# EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+# WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR ANY
+# DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+# (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+# ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+# THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#
+# ------------------------------
+# PKGBASE pkgbase-update(8) TOOL
+# ------------------------------
+# vermaden [AT] interia [DOT] pl
+# https://vermaden.wordpress.com
+
+__usage() {
+  NAME=${0##*/}
+  echo "usage:"
+  echo "  ${NAME} upgrade -r VERSION"
+  echo "  ${NAME} install"
+  echo "  ${NAME} loader"
+  echo "  ${NAME} pkgnew"
+  echo "  ${NAME} modules"
+  exit 1
+}
+
+__clean() {
+  umount -f /boot/efi 1> /dev/null 2> /dev/null
+  [ "${VER_REG}" != "" ] && rm -rf "/tmp/${VER_REG}"
+}
+
+__pkgnew() {
+  echo "INFO: checking for configs installed as '.pkgnew' files ..."
+  find /etc /usr/local/etc -name '*.pkgnew' -ls
+  echo "INFO: if any files listed above - manually compare them"
+  echo "INFO:   # diff -u /etc/rc.conf /etc/rc.conf.pkgnew"
+  echo "INFO: and merge any necessary manual changes"
+}
+
+__loader() {
+  BOOT_ROOT=$( mount | awk '/ \/ / {print $1}' )
+  BOOT_POOL=$( echo "${BOOT_ROOT}" | awk -F '/' '{print $1}' )
+  BOOT_DISK=$( zpool status "${BOOT_POOL}" \
+                 | grep -A 256 NAME \
+                 | grep -v '^errors:' \
+                 | grep -v NAME \
+                 | sed 1d \
+                 | awk '{print $1}' \
+                 | awk -F '.' '{print $1}' \
+                 | grep -o -E '[a-z]+[0-9]+' \
+                 | head -1 )
+
+  BOOT_EFI=$( gpart show -p "${BOOT_DISK}" | grep ' efi ' | awk '{print $3}' )
+
+  if ! mkdir -p /boot/efi 1> /dev/null 2> /dev/null
+  then
+    echo "NOPE: could not make sure '/boot/efi' exists"
+    exit 1
+  fi
+
+  if ! mount_msdosfs "/dev/${BOOT_EFI}" /boot/efi 1> /dev/null 2> /dev/null
+  then
+    echo "NOPE: could not mount(8) UEFI partition"
+    exit 1
+  fi
+
+  case $( uname -p ) in
+    (amd64)   cp /boot/loader.efi /boot/efi/efi/boot/BOOTX64.EFI  ; RET_VAL=${?} ;;
+    (aarch64) cp /boot/loader.efi /boot/efi/efi/boot/BOOTAA64.EFI ; RET_VAL=${?} ;;
+    (armv7)   cp /boot/loader.efi /boot/efi/efi/boot/BOOTARM.EFI  ; RET_VAL=${?} ;;
+  esac
+
+  if [ ${RET_VAL} != "0" ]
+  then
+    echo "NOPE: failed to update UEFI FreeBSD loader(8) bootcode"
+    exit 1
+  fi
+
+  umount -f /boot/efi 1> /dev/null 2> /dev/null
+}
+
+__ver_regex() { # 1=VERSION_TO_CHECK
+  VER_REG=$( echo "${1}" | grep -o -E '[0-9]+\.[0-9]-[A-Z]+[0-9]*' )
+  VER_INS=$( freebsd-version )
+  VER_NUM=$( echo "${VER_REG}" | awk -F '-' '{print $1}' )
+  VER_NUM_MJR=$( echo "${VER_NUM}" | awk -F '.' '{print $1}' )
+  VER_NUM_MIN=$( echo "${VER_NUM}" | awk -F '.' '{print $2}' )
+  VER_CLS=$( echo "${VER_REG}" | awk -F '-' '{print $2}' )
+  VER_CLS_LOW=$( echo "${VER_CLS}" | tr 'A-Z' 'a-z' )
+
+  if [ "${VER_REG}" != "${1}" ]
+  then
+    echo "NOPE: the '${1}' does not looks like valid FreeBSD target version"
+    exit 1
+  else
+    VER_CHK=$( echo -e "${VER_INS}\n${VER_REG}" | sort -n | tail -1 )
+    if [ "${VER_CHK}" != "${VER_REG}" ]
+    then
+      echo "NOPE: installed '${VER_INS}' is newer then '${VER_REG}' target."
+      exit 1
+    fi
+    echo "INFO: upgrading from '${VER_INS}' to '${VER_REG}' version"
+  fi
+}
+
+trap '__clean' 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+
+case "${1}" in
+  (upgrade)
+
+    case "${2}" in
+      (-r)
+        __ver_regex "${3}"
+
+        pkg upgrade -y -r FreeBSD-ports pkg
+
+        if ! mkdir -p "/tmp/${VER_REG}" 1> /dev/null 2> /dev/null
+        then
+          echo "NOPE: could not create '/tmp/${VER_REG}' dir"
+          exit 1
+        fi
+
+        if ! touch "/tmp/${VER_REG}/repo.conf" 1> /dev/null 2> /dev/null
+        then
+          echo "NOPE: could not create '/tmp/${VER_REG}/repo.conf' file"
+          exit 1
+        fi
+
+        echo "FreeBSD-base: {
+                url: \"https://pkg.FreeBSD.org/\${ABI}/base_release_${VER_NUM_MIN}_${VER_CLS_LOW}\"
+              }" > "/tmp/${VER_REG}/repo.conf"
+
+        pkg -o REPOS_DIR=/etc/pkg,/usr/local/etc/pkg/repos,"/tmp/${VER_REG}" \
+            -o IGNORE_OSVERSION=yes \
+            upgrade -r FreeBSD-base
+
+        echo "INFO: review pkg(8) info - sometimes 'service <name> setup' is needed"
+
+        pkg -o REPOS_DIR=/etc/pkg,/usr/local/etc/pkg/repos,"/tmp/${VER_REG}" \
+            upgrade -r FreeBSD-ports-kmods
+
+        __loader
+
+        __pkgnew
+
+        echo "INFO: you successfully finished the upgrade process"
+        echo "INFO: you may now restart the system with usual command"
+        echo "INFO:   # shutdown -r now"
+
+        __clean
+        ;;
+
+      (*)
+        __usage
+        ;;
+
+    esac
+    ;;
+
+  (loader)
+    __loader
+    ;;
+
+  (pkgnew)
+    __pkgnew
+    ;;
+
+  (modules)
+    echo "INFO: check for 3rd party kmods installed from packages"
+    pkg which $( kldstat -v | awk -F '[()]' '/\.ko/ {print $2}' )
+    echo "INFO: modules at '/boot/kernel' are part of Base System"
+    echo "INFO: modules at '/boot/modules' are installed by pkg(8) packages"
+    ;;
+
+  (*)
+    __usage
+    ;;
+
+esac
